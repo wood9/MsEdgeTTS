@@ -9,6 +9,7 @@ import {Agent} from "http";
 import {PITCH} from "./PITCH";
 import {RATE} from "./RATE";
 import {VOLUME} from "./VOLUME";
+import {getHeadersAndData, parseMetadata} from "./utils";
 
 export type Voice = {
     Name: string;
@@ -42,6 +43,7 @@ export class ProsodyOptions {
 }
 
 export class MsEdgeTTS {
+    static wordBoundaryEnabled = true;
     static OUTPUT_FORMAT = OUTPUT_FORMAT;
     private static TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
     private static VOICES_URL = `https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=${MsEdgeTTS.TRUSTED_CLIENT_TOKEN}`;
@@ -57,9 +59,15 @@ export class MsEdgeTTS {
     private _streams: { [key: string]: Readable } = {};
     private _startTime = 0;
     private readonly _agent: Agent;
+    private _arraybuffer: boolean = false;
+    private state = {
+        offsetCompensation: 0,
+        lastDurationOffset: 0
+    };
 
     private _log(...o: any[]) {
         if (this._enableLogger) {
+            o.unshift('edgetts:');
             console.log(...o)
         }
     }
@@ -85,7 +93,7 @@ export class MsEdgeTTS {
             await this._initClient();
         }
         this._ws.send(message, () => {
-            this._log("<- sent message: ", message);
+            //this._log("<- sent message: ", message);
         });
     }
 
@@ -94,7 +102,7 @@ export class MsEdgeTTS {
             ? new WebSocket(MsEdgeTTS.SYNTH_URL)
             : new WebSocket(MsEdgeTTS.SYNTH_URL, {agent: this._agent});
 
-        this._ws.binaryType = "arraybuffer";
+        if (this._arraybuffer) this._ws.binaryType = "arraybuffer";
         return new Promise((resolve, reject) => {
             this._ws.onopen = () => {
                 this._log("Connected in", (Date.now() - this._startTime) / 1000, "seconds")
@@ -105,7 +113,7 @@ export class MsEdgeTTS {
                                 "audio": {
                                     "metadataoptions": {
                                         "sentenceBoundaryEnabled": "false",
-                                        "wordBoundaryEnabled": "false"
+                                        "wordBoundaryEnabled": "${MsEdgeTTS.wordBoundaryEnabled}"
                                     },
                                     "outputFormat": "${this._outputFormat}" 
                                 }
@@ -115,22 +123,83 @@ export class MsEdgeTTS {
                 `).then(resolve);
             };
             this._ws.onmessage = (m) => {
-                const buffer = Buffer.from(m.data as ArrayBuffer);
-                const message = buffer.toString()
-                const requestId = /X-RequestId:(.*?)\r\n/gm.exec(message)[1];
-                if (message.includes("Path:turn.start")) {
-                    // start of turn, ignore
-                } else if (message.includes("Path:turn.end")) {
-                    // end of turn, close stream
-                    this._streams[requestId].push(null);
-                } else if (message.includes("Path:response")) {
-                    // context response, ignore
-                } else if (message.includes("Path:audio") && m.data instanceof ArrayBuffer) {
-                    this._pushAudioData(buffer, requestId)
+                this._log("type:::::::: ", typeof m.data);
+                let mdata:any = m.data;
+
+                if (typeof mdata === 'string') {
+                    const encodedData = Buffer.from(mdata, 'utf8');
+                    const message = mdata;
+                    const requestId = /X-RequestId:(.*?)\r\n/gm.exec(message)[1];
+                    let [headers, data] = getHeadersAndData(encodedData, encodedData.indexOf("\r\n\r\n"));
+                    const path = headers['Path'];  
+                    if (path === "audio.metadata") {
+                        let parsedMetadata = parseMetadata(data, this.state["offsetCompensation"]);
+                        this._pushData(parsedMetadata, requestId);
+                        // 更新上一次的持续时间偏移量，用于下一次 SSML 请求
+                        this.state["lastDurationOffset"] = parsedMetadata["offset"] + parsedMetadata["duration"];
+                    } else if (path === "turn.end") {
+                        this.state["offsetCompensation"] = this.state["lastDurationOffset"];
+                        this.state["offsetCompensation"] += 8750000;
+                    } else if (path !== "response" && path !== "turn.start") {
+                        // 如果路径不是 "response" 或 "turn.start"
+                        throw new Error("Unknown path received"); // 抛出未知响应错误
+                    }
+                } else if (Buffer.isBuffer(mdata)) {
+                    const message = mdata.toString()
+                    const requestId = /X-RequestId:(.*?)\r\n/gm.exec(message)[1];
+                    const headerLength = mdata.readUInt16BE(0);
+                    if (headerLength > mdata.length) {
+                        throw new Error("The header length is greater than the length of the data.");
+                    }
+                      
+                    // Parse the headers and data from the binary message.
+                    let [headers, data] = getHeadersAndData(mdata, headerLength);
+                    if (headers['Path'] !== 'audio') {
+                        throw new Error("Received binary message, but the path is not audio.");
+                    }
+                    const contentType = headers['Content-Type'];
+                    if (contentType !== 'audio/mpeg' && contentType !== undefined) {
+                        throw new Error("Received binary message, but with an unexpected Content-Type.");
+                    }
+                      
+                    // We only allow no Content-Type if there is no data.
+                    if (contentType === undefined) {
+                        if (data.length === 0) {
+                            return;
+                        }
+                      
+                        // If the data is not empty, then we need to raise an exception.
+                        throw new Error("Received binary message with no Content-Type, but with data.");
+                    }
+                      
+                    // If the data is empty now, then we need to raise an exception.
+                    if (data.length === 0) {
+                        throw new Error("Received binary message, but it is missing the audio data.");
+                    }
+                      
+                    this._pushData({ type: "audio", data: data }, requestId);
                 } else {
-                    this._log("UNKNOWN MESSAGE", message);
+                    mdata = Buffer.isBuffer(mdata) ? mdata : mdata['data'];
+                    const buffer = Buffer.from(mdata);
+                    const message = buffer.toString()
+                    const requestId = /X-RequestId:(.*?)\r\n/gm.exec(message)[1];
+                    this._log(message.includes("Path:audio") ,Buffer.isBuffer(mdata), mdata instanceof ArrayBuffer);
+                    
+                    if (message.includes("Path:turn.start")) {
+                        // start of turn, ignore
+                    } else if (message.includes("Path:turn.end")) {
+                        // end of turn, close stream
+                        this._streams[requestId].push(null);
+                    } else if (message.includes("Path:response")) {
+                        // context response, ignore
+                    } else if (message.includes("Path:audio") && Buffer.isBuffer(mdata)) {
+                        this._pushAudioData(buffer, requestId)
+                    } else {
+                        //this._log("UNKNOWN MESSAGE", message);
+                    }
                 }
             }
+
             this._ws.onclose = () => {
                 this._log("disconnected after:", (Date.now() - this._startTime) / 1000, "seconds")
                 for (const requestId in this._streams) {
@@ -143,11 +212,16 @@ export class MsEdgeTTS {
         });
     }
 
+    private _pushData(data: any, requestId: string) {
+        data = typeof data == "string" ? data : JSON.stringify(data);
+        this._streams[requestId].push(data, 'utf8');
+    }
+
     private _pushAudioData(audioBuffer: Buffer, requestId: string) {
         const audioStartIndex = audioBuffer.indexOf(MsEdgeTTS.BINARY_DELIM) + MsEdgeTTS.BINARY_DELIM.length;
         const audioData = audioBuffer.subarray(audioStartIndex);
         this._streams[requestId].push(audioData);
-        this._log("received audio chunk, size: ", audioData?.length)
+        this._log("_pushAudioData: received audio chunk, size: ", audioData?.length)
     }
 
     private _SSMLTemplate(input: string, options: ProsodyOptions = {}): string {
@@ -162,10 +236,6 @@ export class MsEdgeTTS {
             </speak>`;
     }
 
-    /**
-     * Fetch the list of voices available in Microsoft Edge.
-     * These, however, are not all. The complete list of voices supported by this module [can be found here](https://docs.microsoft.com/en-us/azure/cognitive-services/speech-service/language-support) (neural, standard, and preview).
-     */
     getVoices(): Promise<Voice[]> {
         return new Promise((resolve, reject) => {
             axios.get(MsEdgeTTS.VOICES_URL)
@@ -174,15 +244,10 @@ export class MsEdgeTTS {
         });
     }
 
-    /**
-     * Sets the required information for the speech to be synthesised and inits a new WebSocket connection.
-     * Must be called at least once before text can be synthesised.
-     * Saved in this instance. Can be called at any time times to update the metadata.
-     *
-     * @param voiceName a string with any `ShortName`. A list of all available neural voices can be found [here](https://docs.microsoft.com/en-us/azure/cognitive-services/speech-service/language-support#neural-voices). However, it is not limited to neural voices: standard voices can also be used. A list of standard voices can be found [here](https://docs.microsoft.com/en-us/azure/cognitive-services/speech-service/language-support#standard-voices)
-     * @param outputFormat any {@link OUTPUT_FORMAT}
-     * @param voiceLocale (optional) any voice locale that is supported by the voice. See the list of all voices for compatibility. If not provided, the locale will be inferred from the `voiceName`
-     */
+    setConfig( conf:any) {
+        this._arraybuffer = conf["arraybuffer"] ?? false;
+    }
+
     async setMetadata(voiceName: string, outputFormat: OUTPUT_FORMAT, voiceLocale?: string) {
         const oldVoice = this._voice;
         const oldVoiceLocale = this._voiceLocale;
@@ -213,54 +278,23 @@ export class MsEdgeTTS {
             "Speech synthesis not configured yet. Run setMetadata before calling toStream or toFile.");
     }
 
-    /**
-     * Close the WebSocket connection.
-     */
     close() {
         this._ws.close();
     }
 
-    /**
-     * Writes raw audio synthesised from text to a file. Uses a basic {@link _SSMLTemplate SML template}.
-     *
-     * @param path a valid output path, including a filename and file extension.
-     * @param input the input to synthesise
-     * @param options (optional) {@link ProsodyOptions}
-     * @returns {Promise<string>} - a `Promise` with the full filepath
-     */
     toFile(path: string, input: string, options?: ProsodyOptions): Promise<string> {
         return this._rawSSMLRequestToFile(path, this._SSMLTemplate(input, options));
     }
 
-    /**
-     * Writes raw audio synthesised from text in real-time to a {@link Readable}. Uses a basic {@link _SSMLTemplate SML template}.
-     *
-     * @param input the text to synthesise. Can include SSML elements.
-     * @param options (optional) {@link ProsodyOptions}
-     * @returns {Readable} - a `stream.Readable` with the audio data
-     */
     toStream(input: string, options?: ProsodyOptions): Readable {
         const {stream} = this._rawSSMLRequest(this._SSMLTemplate(input, options));
         return stream;
     }
 
-    /**
-     * Writes raw audio synthesised from text to a file. Has no SSML template. Basic SSML should be provided in the request.
-     *
-     * @param path a valid output path, including a filename and file extension.
-     * @param requestSSML the SSML to send. SSML elements required in order to work.
-     * @returns {Promise<string>} - a `Promise` with the full filepath
-     */
     rawToFile(path: string, requestSSML: string): Promise<string> {
         return this._rawSSMLRequestToFile(path, requestSSML);
     }
 
-    /**
-     * Writes raw audio synthesised from a request in real-time to a {@link Readable}. Has no SSML template. Basic SSML should be provided in the request.
-     *
-     * @param requestSSML the SSML to send. SSML elements required in order to work.
-     * @returns {Readable} - a `stream.Readable` with the audio data
-     */
     rawToStream(requestSSML: string): Readable {
         const {stream} = this._rawSSMLRequest(requestSSML);
         return stream;
@@ -300,6 +334,7 @@ export class MsEdgeTTS {
             read() {
             },
             destroy(error: Error | null, callback: (error: (Error | null)) => void) {
+                self._log("+_+_+_+__+_", error);
                 delete self._streams[requestId];
                 callback(error);
             },
