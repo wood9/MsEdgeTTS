@@ -1,6 +1,6 @@
 {
     "name": "edge-tts-node",
-    "version": "1.3.6",
+    "version": "1.5.1",
     "description": "An Azure Speech Service module that uses the Microsoft Edge Read Aloud API.",
     "author": "Migushthe2nd <Migushthe2nd@users.noreply.github.com>",
     "license": "MIT",
