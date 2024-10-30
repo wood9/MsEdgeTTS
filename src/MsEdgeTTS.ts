@@ -207,7 +207,17 @@ export class MsEdgeTTS {
                 }
             }
             this._ws.onerror = function (error) {
-                reject("Connect Error: " + error);
+                let errorMessage;
+                if (typeof error === "object" && error !== null) {
+                    try {
+                        errorMessage = JSON.stringify(error);
+                    } catch (e) {
+                        errorMessage = error + "";
+                    }
+                } else {
+                    errorMessage = error + "";
+                }
+                reject("Connect Error: " + errorMessage);
             };
         });
     }
