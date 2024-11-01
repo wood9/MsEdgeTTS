@@ -9,7 +9,9 @@ import {Agent} from "http";
 import {PITCH} from "./PITCH";
 import {RATE} from "./RATE";
 import {VOLUME} from "./VOLUME";
+import {generateSecMSGecParam} from "./SecMSGec";
 import {getHeadersAndData, parseMetadata} from "./utils";
+import {WSS_HEADERS, VOICE_HEADERS} from "./Headers";
 
 export type Voice = {
     Name: string;
@@ -22,23 +24,8 @@ export type Voice = {
 }
 
 export class ProsodyOptions {
-    /**
-     * The pitch to use.
-     * Can be any {@link PITCH}, or a relative frequency in Hz (+50Hz), a relative semitone (+2st), or a relative percentage (+50%).
-     * [SSML documentation](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/speech-synthesis-markup-voice#:~:text=Optional-,pitch,-Indicates%20the%20baseline)
-     */
     pitch?: PITCH | string = "+0Hz";
-    /**
-     * The rate to use.
-     * Can be any {@link RATE}, or a relative number (0.5), or string with a relative percentage (+50%).
-     * [SSML documentation](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/speech-synthesis-markup-voice#:~:text=Optional-,rate,-Indicates%20the%20speaking)
-     */
     rate?: RATE | string | number = 1.0;
-    /**
-     * The volume to use.
-     * Can be any {@link VOLUME}, or an absolute number (0, 100), a string with a relative number (+50), or a relative percentage (+50%).
-     * [SSML documentation](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/speech-synthesis-markup-voice#:~:text=Optional-,volume,-Indicates%20the%20volume)
-     */
     volume?: VOLUME | string | number = 100.0;
 }
 
@@ -46,8 +33,7 @@ export class MsEdgeTTS {
     static wordBoundaryEnabled = true;
     static OUTPUT_FORMAT = OUTPUT_FORMAT;
     public static TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-    private static VOICES_URL = `https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=${MsEdgeTTS.TRUSTED_CLIENT_TOKEN}`;
-    private static SYNTH_URL = `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${MsEdgeTTS.TRUSTED_CLIENT_TOKEN}`;
+    
     private static BINARY_DELIM = "Path:audio\r\n";
     private static VOICE_LANG_REGEX = /\w{2}-\w{2}/;
     private readonly _enableLogger;
@@ -59,11 +45,22 @@ export class MsEdgeTTS {
     private _streams: { [key: string]: Readable } = {};
     private _startTime = 0;
     private readonly _agent: Agent;
+    private _headers = null;
     private _arraybuffer: boolean = false;
     private state = {
         offsetCompensation: 0,
         lastDurationOffset: 0
     };
+
+    private static getVoicesUrl(): string {
+        const param = generateSecMSGecParam();
+        return `https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=${MsEdgeTTS.TRUSTED_CLIENT_TOKEN}${param}`;
+    }
+    
+    private static getSynthUrl(): string {
+        const param = generateSecMSGecParam();
+        return `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${MsEdgeTTS.TRUSTED_CLIENT_TOKEN}${param}`;
+    }
 
     private _log(...o: any[]) {
         if (this._enableLogger) {
@@ -78,8 +75,11 @@ export class MsEdgeTTS {
      * @param agent (optional, **NOT SUPPORTED IN BROWSER**) Use a custom http.Agent implementation like [https-proxy-agent](https://github.com/TooTallNate/proxy-agents) or [socks-proxy-agent](https://github.com/TooTallNate/proxy-agents/tree/main/packages/socks-proxy-agent).
      * @param enableLogger=false whether to enable the built-in logger. This logs connections inits, disconnects, and incoming data to the console
      */
-    public constructor(agent?: Agent, enableLogger: boolean = false) {
+    public constructor({ agent = undefined, headers = null, enableLogger = false }) {
         this._agent = agent;
+        this._headers = headers || {
+            headers: WSS_HEADERS
+        };
         this._enableLogger = enableLogger;
         this._isBrowser = typeof window !== "undefined" && typeof window.document !== "undefined";
     }
@@ -99,8 +99,8 @@ export class MsEdgeTTS {
 
     private _initClient() {
         this._ws = this._isBrowser
-            ? new WebSocket(MsEdgeTTS.SYNTH_URL)
-            : new WebSocket(MsEdgeTTS.SYNTH_URL, {agent: this._agent});
+            ? new WebSocket(MsEdgeTTS.getSynthUrl())
+            : new WebSocket(MsEdgeTTS.getSynthUrl(), {agent: this._agent, ...this._headers});
 
         if (this._arraybuffer) this._ws.binaryType = "arraybuffer";
         return new Promise((resolve, reject) => {
@@ -206,7 +206,8 @@ export class MsEdgeTTS {
                     this._streams[requestId].push(null);
                 }
             }
-            this._ws.onerror = function (error) {
+            this._ws.onerror = (error)=> {
+                this._log(error);
                 let errorMessage;
                 if (typeof error === "object" && error !== null) {
                     try {
@@ -248,7 +249,7 @@ export class MsEdgeTTS {
 
     getVoices(): Promise<Voice[]> {
         return new Promise((resolve, reject) => {
-            axios.get(MsEdgeTTS.VOICES_URL)
+            axios.get(MsEdgeTTS.getVoicesUrl())
                 .then((res) => resolve(res.data))
                 .catch(reject);
         });
