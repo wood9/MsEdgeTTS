@@ -1,21 +1,19 @@
-import crypto from "crypto";
+import { createHash } from "node:crypto";
+const WINDOWS_FILE_TIME_EPOCH = 11644473600n;
 
-export function generateSecMSGec() {
-  const randomBytes = crypto.randomBytes(32);
-  return randomBytes.toString("hex");
+export function generateSecMsGecToken(token: string): string {
+  const ticks =
+    BigInt(Math.floor(Date.now() / 1000) + Number(WINDOWS_FILE_TIME_EPOCH)) *
+    10000000n;
+  const roundedTicks = ticks - (ticks % 3000000000n);
+  const strToHash = `${roundedTicks}${token}`;
+  const hash = createHash("sha256");
+  hash.update(strToHash, "ascii");
+  return hash.digest("hex").toUpperCase();
 }
 
-export function generateSecMSGec2(size = 64) {
-  return [...Array(size)]
-    .map(() => Math.floor(Math.random() * 16).toString(16))
-    .join("")
-    .toUpperCase();
-}
-
-export function generateSecMSGecParam() {
-  return "";
-
-  const version = "1-114.0.1823.67";
-  const gec = generateSecMSGec2().toUpperCase();
+export function generateSecMSGecParam(token: string) {
+  const version = "1-130.0.2849.68";
+  const gec = generateSecMsGecToken(token);
   return `&Sec-MS-GEC=${gec}&Sec-MS-GEC-Version=${version}`;
 }

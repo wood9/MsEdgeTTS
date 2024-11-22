@@ -53,12 +53,12 @@ export class MsEdgeTTS {
     };
 
     private static getVoicesUrl(): string {
-        const param = generateSecMSGecParam();
+        const param = generateSecMSGecParam(MsEdgeTTS.TRUSTED_CLIENT_TOKEN);
         return `https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=${MsEdgeTTS.TRUSTED_CLIENT_TOKEN}${param}`;
     }
     
     private static getSynthUrl(): string {
-        const param = generateSecMSGecParam();
+        const param = generateSecMSGecParam(MsEdgeTTS.TRUSTED_CLIENT_TOKEN);
         return `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${MsEdgeTTS.TRUSTED_CLIENT_TOKEN}${param}`;
     }
 
@@ -69,12 +69,10 @@ export class MsEdgeTTS {
         }
     }
 
-    /**
-     * Create a new `MsEdgeTTS` instance.
-     *
-     * @param agent (optional, **NOT SUPPORTED IN BROWSER**) Use a custom http.Agent implementation like [https-proxy-agent](https://github.com/TooTallNate/proxy-agents) or [socks-proxy-agent](https://github.com/TooTallNate/proxy-agents/tree/main/packages/socks-proxy-agent).
-     * @param enableLogger=false whether to enable the built-in logger. This logs connections inits, disconnects, and incoming data to the console
-     */
+    public static setToken(token: string) {
+        MsEdgeTTS.TRUSTED_CLIENT_TOKEN = token;
+    }
+
     public constructor({ agent = undefined, headers = null, enableLogger = false }) {
         this._agent = agent;
         this._headers = headers || {
@@ -122,8 +120,8 @@ export class MsEdgeTTS {
                     }
                 `).then(resolve);
             };
+            
             this._ws.onmessage = (m) => {
-                this._log("type:::::::: ", typeof m.data);
                 let mdata:any = m.data;
 
                 if (typeof mdata === 'string') {
@@ -345,7 +343,7 @@ export class MsEdgeTTS {
             read() {
             },
             destroy(error: Error | null, callback: (error: (Error | null)) => void) {
-                self._log("+_+_+_+__+_", error);
+                self._log("stream error:: ", error);
                 delete self._streams[requestId];
                 callback(error);
             },
